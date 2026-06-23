@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-06-23
+
+### Fixed
+- `threadwatch.service`: dropped `CapabilityBoundingSet`/`AmbientCapabilities` and the
+  `ProtectKernelModules`/`ProtectKernelLogs`/`ProtectClock` directives. In a `--user`
+  manager they try to drop bounding-set capabilities without `CAP_SETPCAP` and fail the
+  unit with `218/CAPABILITIES`. The process is unprivileged, so nothing is lost.
+- `threadwatch.service`: removed `@resources` from the syscall deny-list. `claude` uses
+  sched/rlimit syscalls in that group and was being SIGSYS-killed (`69/UNAVAILABLE`).
+- `threadwatch.timer`: moved inline comments off the `Persistent=`/`RandomizedDelaySec=`
+  lines (systemd has no inline comments, so the values were silently ignored).
+- `install.sh`: replaced the `usage` shebang with plain bash arg parsing; the installed
+  `usage` version parsed the script as KDL and failed under ansible/systemd.
+
+### Verified
+- End-to-end run inside the hardened `--user` unit on subscription `claude -p`: clean
+  `run_complete`, report written, sandbox holds. The headless-auth unknown is resolved.
+
 ## [0.1.0] - 2026-06-23
 
 ### Added

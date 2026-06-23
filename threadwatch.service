@@ -29,11 +29,12 @@ PrivateTmp=true
 # --- Privilege / kernel ---
 NoNewPrivileges=true
 ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
-ProtectClock=true
 ProtectHostname=true
+# ProtectKernelModules / ProtectKernelLogs / ProtectClock are omitted: in a --user
+# manager they try to drop CAP_SYS_MODULE/CAP_SYSLOG/CAP_SYS_TIME from the bounding
+# set, which needs CAP_SETPCAP and fails the unit (218/CAPABILITIES). The process is
+# unprivileged and holds none of those capabilities anyway, so nothing is lost.
 ProtectProc=invisible
 ProcSubset=pid
 RestrictNamespaces=true
@@ -41,14 +42,17 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RemoveIPC=true
-CapabilityBoundingSet=
-AmbientCapabilities=
+# CapabilityBoundingSet/AmbientCapabilities are intentionally omitted: a --user
+# service is already unprivileged and cannot drop the bounding set without
+# CAP_SETPCAP, which fails the unit with 218/CAPABILITIES. NoNewPrivileges covers it.
 
 # --- Syscalls / network (KEEP AF_INET* — the API needs it; DNS is resolved stub on loopback) ---
 SystemCallArchitectures=native
-# A '~' line is a deny-list; both groups on it are denied (don't repeat the '~').
+# Allowlist @system-service, then deny only @privileged. Do NOT also deny @resources:
+# claude uses sched/rlimit syscalls in that group, and a denied call is SIGSYS-killed
+# (rc -31 / 31=SIGSYS), not EPERM. (A '~' line is a deny-list.)
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@privileged
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # DO NOT set PrivateNetwork=yes (kills the API). DO NOT set IPAddressDeny=any here
 # (cgroup-eBPF is unreliable under --user and would silently break loopback DNS).

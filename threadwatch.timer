@@ -5,8 +5,11 @@ Description=threadwatch hourly knowledge-thread scan (runs only while logged in)
 
 [Timer]
 OnCalendar=hourly
-Persistent=true            # fire ONCE on next login if a run was missed (no stampede)
-RandomizedDelaySec=300     # jitter; less predictable, avoids on-the-dot hammering
+# Fire ONCE on next login if a run was missed (no stampede). systemd does not
+# allow inline comments after a value, so these notes live on their own lines.
+Persistent=true
+# Jitter (seconds): less predictable, avoids on-the-dot hammering.
+RandomizedDelaySec=300
 AccuracySec=1min
 Unit=threadwatch.service
 
