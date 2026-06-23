@@ -1,19 +1,28 @@
-#!/usr/bin/env -S usage bash
-# USAGE flag "-e --enable" "Also enable + start the timer (default: install + verify only)"
-# USAGE flag "-n --dry-run" "Verify units without symlinking or enabling"
-#
-# install.sh — idempotent. Symlinks the wrapper + units into place, verifies, and
-# (only with --enable) turns the timer on. Safe to re-run; `git pull` updates the
+#!/usr/bin/env bash
+# install.sh -- idempotent. Symlinks the wrapper + units into place, verifies,
+# and (with --enable) turns the timer on. Safe to re-run; `git pull` updates the
 # live units via the symlinks after a daemon-reload.
-# Run standalone: ./install.sh   (then ./install.sh --enable when ready)
+#   --enable    also enable + start the timer (default: install + verify only)
+#   --dry-run   verify units without symlinking or enabling
+# Run standalone: ./install.sh        (then ./install.sh --enable when ready)
 set -euo pipefail
+
+enable=0; dry_run=0
+for arg in "$@"; do
+    case "$arg" in
+        -e|--enable)  enable=1 ;;
+        -n|--dry-run) dry_run=1 ;;
+        -h|--help)    grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "unknown arg: $arg" >&2; exit 64 ;;
+    esac
+done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 units_dir="$HOME/.config/systemd/user"
 bin_dir="$HOME/.local/bin"
 state_dir="$HOME/threadwatch"
 
-if [ -n "${usage_dry_run:-}" ]; then
+if [ "$dry_run" = 1 ]; then
     systemd-analyze --user verify "$here/threadwatch.service" || true
     echo "dry-run: verified units, nothing installed"
     exit 0
@@ -36,7 +45,7 @@ systemctl --user daemon-reload
 systemd-analyze --user verify "$units_dir/threadwatch.service"
 echo "installed. sandbox score: systemd-analyze security --user threadwatch.service"
 
-if [ -n "${usage_enable:-}" ]; then
+if [ "$enable" = 1 ]; then
     systemctl --user enable --now threadwatch.timer
     systemctl --user list-timers threadwatch.timer
 else
