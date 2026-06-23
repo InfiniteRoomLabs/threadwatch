@@ -15,6 +15,9 @@ TimeoutStartSec=600
 # UV_NO_CACHE keeps uv from writing a cache under the read-only home.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=UV_NO_CACHE=1
+# Guarantee subscription auth ($0/call): claude -p prefers ANTHROPIC_API_KEY over the
+# logged-in OAuth session, so strip any inherited key to never make this a paid call.
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
 # --- Filesystem: read-only everywhere, ONE writable hole ---
 ProtectSystem=strict

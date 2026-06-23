@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-06-23
+
+### Security
+- `threadwatch.service`: `UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN`.
+  `claude -p` prefers an API key over the OAuth session, so an inherited key would
+  silently turn the timer into paid API calls. Stripping it guarantees subscription
+  ($0) auth regardless of the surrounding environment.
+
 ## [0.1.1] - 2026-06-23
 
 ### Fixed
