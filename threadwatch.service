@@ -1,0 +1,65 @@
+# threadwatch.service — read-only everywhere except ONE writable dir (~/threadwatch).
+# WHY user-level + no linger: runs as you, sees your `claude` OAuth session, and
+# "only while logged in" comes free from NOT enabling linger.
+# Run standalone: `systemctl --user start threadwatch.service` then
+#   `journalctl --user -u threadwatch -o cat -e`
+[Unit]
+Description=threadwatch read-only knowledge-thread scan
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/threadwatch run
+TimeoutStartSec=600
+
+# PATH so the shebang finds `uv` and the script finds `claude` (both in ~/.local/bin).
+# UV_NO_CACHE keeps uv from writing a cache under the read-only home.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=UV_NO_CACHE=1
+
+# --- Filesystem: read-only everywhere, ONE writable hole ---
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=%h/disability-email-archive
+ReadOnlyPaths=%h/claude-ai-export
+ReadOnlyPaths=%h/.claude
+ReadOnlyPaths=%h/.claude.json
+ReadWritePaths=%h/threadwatch
+PrivateTmp=true
+
+# --- Privilege / kernel ---
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- Syscalls / network (KEEP AF_INET* — the API needs it; DNS is resolved stub on loopback) ---
+SystemCallArchitectures=native
+# A '~' line is a deny-list; both groups on it are denied (don't repeat the '~').
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# DO NOT set PrivateNetwork=yes (kills the API). DO NOT set IPAddressDeny=any here
+# (cgroup-eBPF is unreliable under --user and would silently break loopback DNS).
+# DO NOT set MemoryDenyWriteExecute=true unless a node/V8 claude path is reintroduced.
+
+# --- Resource caps ---
+MemoryMax=2G
+CPUQuota=80%
+TasksMax=256
+
+# --- Logging: wrapper emits one JSON line to stderr -> journal ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=threadwatch

@@ -1,0 +1,14 @@
+# threadwatch.timer — fire ~hourly, ONLY while logged in (no linger), catch up once on login.
+# Run standalone: symlink into ~/.config/systemd/user/ then `systemctl --user enable --now threadwatch.timer`
+[Unit]
+Description=threadwatch hourly knowledge-thread scan (runs only while logged in)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true            # fire ONCE on next login if a run was missed (no stampede)
+RandomizedDelaySec=300     # jitter; less predictable, avoids on-the-dot hammering
+AccuracySec=1min
+Unit=threadwatch.service
+
+[Install]
+WantedBy=timers.target

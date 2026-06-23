@@ -1,0 +1,351 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []          # stdlib-only on purpose: tomllib/json/subprocess/fcntl/logging
+# ///
+"""threadwatch — hourly, read-only knowledge-thread scanner.
+
+WHAT: reads a hand-edited watchlist (.threadwatch.toml), asks a fully
+tool-locked `claude -p` to scan two READ-ONLY archives for important/active
+threads, and the WRAPPER (this script, deterministic Python) renders the one
+writable artifact THREADWATCH.md. The model never holds a write tool.
+WHY tool-locked + wrapper-writes: an unattended model with Write/Edit/Bash
+"does the task and writes files" instead of returning data (the export tool's
+monitoring-docker-desktop regression). Belt (systemd ReadOnlyPaths) +
+suspenders (--disallowed-tools) + the only writer is code you can read.
+
+Run standalone:
+    ./threadwatch run                 # real scan (needs `claude` on PATH + login session)
+    ./threadwatch run --dry-run       # build + print the prompt, do NOT call claude or write
+    ./threadwatch selfcheck           # offline logic check (no claude, no fs) — exits 0 if render OK
+
+DNA lifted from ~/claude-ai-export (claude_cli.py recipe, lockfile, sysexits).
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import errno
+import fcntl
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+# --- sysexits.h: cron's contract — stderr is mailed on non-zero; the timer/
+#     a healthcheck decides retry-vs-alert from the code. (copied from reindex) ---
+OK, USAGE, UNAVAILABLE, SOFTWARE, TEMPFAIL, CONFIG, NOT_FOUND, SIGINT = (
+    0, 64, 69, 70, 75, 78, 127, 130
+)
+
+HOME = Path.home()
+DEFAULTS = {
+    "report_path": str(HOME / "threadwatch" / "THREADWATCH.md"),
+    "model": "claude-haiku-4-5-20251001",  # cheapest subscription-quota model good enough
+    "max_threads": 25,
+    "archives": [
+        str(HOME / "disability-email-archive"),
+        str(HOME / "claude-ai-export"),
+    ],
+}
+DEFAULT_CONFIG = HOME / "threadwatch" / ".threadwatch.toml"
+CLAUDE_TIMEOUT = 540          # < unit TimeoutStartSec=600 so WE time out first and log
+STREAM_CAP = 4096             # cap captured stderr so a runaway stream can't bloat the log
+
+# Inner-output contract the model must return (forced via `claude -p --json-schema`).
+SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "flagged": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "slug": {"type": "string"},
+                    "urgency": {"type": "string", "enum": ["high", "normal", "low"]},
+                    "thread": {"type": "string"},
+                    "why": {"type": "string"},
+                    "source": {"type": "string"},
+                    "action": {"type": "string"},
+                    "related": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["slug", "urgency", "thread", "why", "source"],
+            },
+        },
+        "quiet": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "slug": {"type": "string"},
+                    "last_activity": {"type": "string"},
+                },
+                "required": ["slug"],
+            },
+        },
+    },
+    "required": ["flagged", "quiet"],
+}
+
+log = logging.getLogger("threadwatch")
+
+
+def _setup_logging() -> None:
+    """One structured line per event. JSON when stderr isn't a tty (the cron/journal
+    path gets ndjson automatically); human-ish otherwise."""
+    as_json = not sys.stderr.isatty() or os.environ.get("THREADWATCH_LOG") == "json"
+    handler = logging.StreamHandler(sys.stderr)
+    if as_json:
+        class _J(logging.Formatter):
+            def format(self, r: logging.LogRecord) -> str:
+                rec = {"ts": dt.datetime.now(dt.UTC).isoformat(), "level": r.levelname.lower(),
+                       "event": r.getMessage()}
+                rec.update(getattr(r, "kv", {}))
+                return json.dumps(rec)
+        handler.setFormatter(_J())
+    else:
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s %(kv)s",
+                                                defaults={"kv": ""}))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+def _ev(event: str, **kv) -> dict:
+    return {"extra": {"kv": kv}}
+
+
+@contextlib.contextmanager
+def single_instance(lock_path: Path):
+    """flock guard — releases on exit even on crash; stale locks self-clear because
+    the lock dies with the fd-holding process. (copied from reindex/lockfile.py)"""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise RuntimeError("another threadwatch instance holds the lock")
+            raise
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.fsync(fd)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def load_config(path: Path) -> dict:
+    cfg = dict(DEFAULTS)
+    watches: list[dict] = []
+    if path.exists():
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+        cfg.update(data.get("threadwatch", {}))
+        watches = data.get("watch", []) or []
+    cfg["watches"] = watches
+    return cfg
+
+
+def build_prompt(cfg: dict) -> str:
+    watches = cfg["watches"]
+    if watches:
+        wl = "\n".join(
+            f"- slug={w.get('slug','?')} urgency={w.get('urgency','normal')} "
+            f"match={w.get('match', [])} — {w.get('why','')}"
+            for w in watches
+        )
+        watch_block = f"WATCHLIST (only these threads matter):\n{wl}"
+    else:
+        watch_block = "No explicit watchlist — do a generic 'what changed / what's hot' pass."
+    return (
+        "You are threadwatch: a read-only scanner over the granted directories.\n"
+        "Use ONLY Read/Grep/Glob (you have no write tools). Do NOT attempt to modify "
+        "anything. Find email/knowledge threads that look important or recently active.\n\n"
+        f"{watch_block}\n\n"
+        f"Granted (read-only) archives:\n" + "\n".join(f"- {a}" for a in cfg["archives"]) + "\n\n"
+        f"Return at most {cfg['max_threads']} flagged threads, newest/most-active first. "
+        "For each: slug (match the watchlist slug when it fits, else coin a kebab slug), "
+        "urgency (high|normal|low), thread (short title), why (one line: why it surfaced now), "
+        "source (a real file path you read), optional action and related slugs. "
+        "Also list watched slugs that were quiet this run. Return ONLY the JSON the schema "
+        "demands — no prose, no files written."
+    )
+
+
+def run_claude(cfg: dict, prompt: str) -> dict:
+    if shutil.which("claude") is None:
+        log.error("claude_not_on_path", **_ev("claude_not_on_path"))
+        sys.exit(NOT_FOUND)
+    args = [
+        "claude", "-p",
+        "--model", cfg["model"],
+        "--disallowed-tools", "Write Edit NotebookEdit Bash",  # ONE space-sep arg; no side effects
+        "--output-format", "json",
+        "--json-schema", json.dumps(SCHEMA),
+    ]
+    for a in cfg["archives"]:
+        args += ["--add-dir", a]  # grants READ within each archive; no write granted anywhere
+    try:
+        proc = subprocess.run(args, input=prompt, text=True, capture_output=True,
+                              timeout=CLAUDE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log.error("claude_timeout", **_ev("claude_timeout", timeout=CLAUDE_TIMEOUT))
+        sys.exit(TEMPFAIL)
+    if proc.returncode != 0:
+        log.error("claude_failed", **_ev("claude_failed", rc=proc.returncode,
+                                         stderr=(proc.stderr or "")[:STREAM_CAP]))
+        sys.exit(UNAVAILABLE)  # quota/auth/network — cron retries next hour
+    return parse_envelope(proc.stdout)
+
+
+def _strip_fences(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else s
+        if s.endswith("```"):
+            s = s.rsplit("```", 1)[0]
+    return s.strip()
+
+
+def parse_envelope(stdout: str) -> dict:
+    """`claude -p --output-format json` double-wraps: outer envelope, then the model's
+    answer is a (possibly fenced) JSON string under .result. Defensive — never crash."""
+    try:
+        envelope = json.loads(stdout)
+        inner = _strip_fences(envelope.get("result", "{}"))
+        data = json.loads(inner)
+    except (json.JSONDecodeError, AttributeError, TypeError) as e:
+        log.error("parse_failed", **_ev("parse_failed", err=str(e)))
+        sys.exit(SOFTWARE)
+    return data
+
+
+def render_report(cfg: dict, data: dict) -> str:
+    """WRAPPER stamps generated_at/run_id/model/counts — never trust the model for these."""
+    flagged = data.get("flagged", []) or []
+    quiet = data.get("quiet", []) or []
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+    fm = [
+        "---",
+        "layout_version: 1",
+        "type: threadwatch-report",
+        f"generated_at: {now}",
+        f"model: {cfg['model']}",
+        f"run_id: {now}",
+        f"archives_scanned: {len(cfg['archives'])}",
+        f"threads_flagged: {len(flagged)}",
+        "---",
+    ]
+    order = {"high": 0, "normal": 1, "low": 2}
+    flagged = sorted(flagged, key=lambda t: order.get(t.get("urgency", "normal"), 1))
+    body = ["", "# THREADWATCH", "",
+            f"_Last refreshed {now}. Read-only scan of {len(cfg['archives'])} archives. "
+            "This file is overwritten every run._", "",
+            "## Flagged (action may be needed)", "",
+            "| urgency | slug | thread | why it surfaced | source |",
+            "|---------|------|--------|-----------------|--------|"]
+    for t in flagged:
+        body.append(
+            f"| {t.get('urgency','normal')} | {t.get('slug','?')} | {t.get('thread','')} "
+            f"| {t.get('why','')} | {t.get('source','')} |"
+        )
+    if not flagged:
+        body.append("| - | - | _nothing flagged this run_ | - | - |")
+    body += ["", "## Detail", ""]
+    for t in flagged:
+        body += [f"### {t.get('slug','?')} — {t.get('thread','')}",
+                 f"- **Source:** `{t.get('source','')}`",
+                 f"- **Why surfaced:** {t.get('why','')}"]
+        if t.get("action"):
+            body.append(f"- **Suggested next action:** {t['action']}")
+        if t.get("related"):
+            body.append(f"- **Related:** {', '.join(t['related'])}")
+        body.append("")
+    body += ["## Watched, quiet (no change this run)"]
+    if quiet:
+        for q in quiet:
+            la = f" — last activity {q['last_activity']}" if q.get("last_activity") else ""
+            body.append(f"- `{q.get('slug','?')}`{la}")
+    else:
+        body.append("- _none_")
+    return "\n".join(fm + body) + "\n"
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    prompt = build_prompt(cfg)
+    if args.dry_run:
+        log.info("dry_run", **_ev("dry_run", watches=len(cfg["watches"]),
+                                  archives=len(cfg["archives"])))
+        print(prompt)
+        return OK
+    report_path = Path(cfg["report_path"])
+    with single_instance(report_path.parent / ".threadwatch.lock"):
+        data = run_claude(cfg, prompt)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(render_report(cfg, data), encoding="utf-8")
+    log.info("run_complete", **_ev("run_complete",
+                                   threads_flagged=len(data.get("flagged", []) or []),
+                                   report=str(report_path)))
+    return OK
+
+
+def cmd_selfcheck(_args: argparse.Namespace) -> int:
+    """Offline logic check — the one runnable thing that fails if render/parse breaks.
+    No claude, no real fs reads."""
+    env = json.dumps({"result": json.dumps({
+        "flagged": [{"slug": "ltd-appeal", "urgency": "high", "thread": "Appeal draft",
+                     "why": "new doc", "source": "/x/y.md", "related": ["ssa-claim"]}],
+        "quiet": [{"slug": "ssa-claim", "last_activity": "2026-06-05"}],
+    })})
+    data = parse_envelope(env)
+    assert data["flagged"][0]["slug"] == "ltd-appeal", "envelope double-unwrap broke"
+    md = render_report(dict(DEFAULTS, watches=[]), data)
+    assert md.startswith("---\nlayout_version: 1"), "frontmatter missing"
+    assert "threads_flagged: 1" in md, "wrapper count stamp broke"
+    assert "ltd-appeal" in md and "Appeal draft" in md, "flagged row missing"
+    # fenced + missing-key tolerance:
+    fenced = json.dumps({"result": "```json\n{\"flagged\":[],\"quiet\":[]}\n```"})
+    assert render_report(dict(DEFAULTS, watches=[]), parse_envelope(fenced)), "fence/empty broke"
+    print("selfcheck OK")
+    return OK
+
+
+def main() -> int:
+    _setup_logging()
+    p = argparse.ArgumentParser(prog="threadwatch", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    pr = sub.add_parser("run", help="scan archives and refresh THREADWATCH.md")
+    pr.add_argument("--config", default=str(DEFAULT_CONFIG))
+    pr.add_argument("--dry-run", action="store_true",
+                    help="build+print the prompt; do NOT call claude or write")
+    pr.set_defaults(fn=cmd_run)
+    sub.add_parser("selfcheck", help="offline render/parse logic check").set_defaults(fn=cmd_selfcheck)
+    args = p.parse_args()
+    try:
+        return args.fn(args)
+    except RuntimeError as e:            # lock contention
+        log.warning("locked", **_ev("locked", reason=str(e)))
+        return TEMPFAIL
+    except KeyboardInterrupt:
+        return SIGINT
+    except SystemExit:
+        raise
+    except Exception as e:               # never crash unattended without a code
+        log.error("unhandled", **_ev("unhandled", err=str(e)))
+        return SOFTWARE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

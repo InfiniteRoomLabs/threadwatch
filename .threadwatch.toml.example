@@ -1,0 +1,29 @@
+# .threadwatch.toml — what to watch, where to report. HUMAN-EDITED.
+# The real copy lives at ~/threadwatch/.threadwatch.toml (outside this repo; PII).
+# install.sh seeds it from this example on first run.
+#
+# Contract: this file is INPUT (you write it, the agent reads it).
+# THREADWATCH.md is OUTPUT (the wrapper writes it, you read it). They never cross.
+
+[threadwatch]
+report_path = "/home/deathnerd/threadwatch/THREADWATCH.md"   # the one writable artifact
+model       = "claude-haiku-4-5-20251001"                    # subscription quota; no per-call $
+max_threads = 25
+archives    = [
+  "/home/deathnerd/disability-email-archive",
+  "/home/deathnerd/claude-ai-export",
+]
+
+# Zero or more [[watch]] blocks. Empty file => agent does a generic "what's hot" pass.
+# `slug` is the join key (matches CHANGELOG scope-slugs + the entity registry).
+[[watch]]
+slug    = "ltd-appeal"
+why     = "OneAmerica denial appeal; deadline ~Nov 2026, 24-mo benefit cap"
+match   = ["oneamerica", "allsup", "ltd", "disability appeal"]
+urgency = "high"
+
+[[watch]]
+slug    = "ssa-claim"
+why     = "SSA disability claim track"
+match   = ["ssa", "social security"]
+urgency = "normal"
