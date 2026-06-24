@@ -1,10 +1,12 @@
-# threadwatch.timer — fire ~hourly, ONLY while logged in (no linger), catch up once on login.
+# threadwatch.timer — fire every ~5h, ONLY while logged in (no linger), catch up once on login.
 # Run standalone: symlink into ~/.config/systemd/user/ then `systemctl --user enable --now threadwatch.timer`
 [Unit]
-Description=threadwatch hourly knowledge-thread scan (runs only while logged in)
+Description=threadwatch 5-hourly knowledge-thread scan (runs only while logged in)
 
 [Timer]
-OnCalendar=hourly
+# Every 5 hours at :15, so each scan lands one invocation per Claude 5h usage window
+# AND after the hourly claudesync.timer (:00) has refreshed the archive.
+OnCalendar=*-*-* 00/5:15:00
 # Fire ONCE on next login if a run was missed (no stampede). systemd does not
 # allow inline comments after a value, so these notes live on their own lines.
 Persistent=true

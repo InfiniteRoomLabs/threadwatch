@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-24
+
+### Changed
+- `threadwatch.timer`: cadence from hourly to every 5 hours at `:15`
+  (`OnCalendar=*-*-* 00/5:15:00`). One scan per Claude 5-hour usage window, and it
+  lands after the hourly claudesync export (which runs at `:00`) so the archive is
+  fresh. Pairs with the new `claudesync.timer` in the claude-ai-export repo.
+
 ## [0.1.2] - 2026-06-23
 
 ### Security
