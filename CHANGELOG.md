@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-26
+
+### Fixed
+- `threadwatch.service`: added an `ExecStartPre` boot-readiness gate. After a power-loss reboot the `Persistent=true` catch-up run fires before the network/`claude` session is ready and exits `69/UNAVAILABLE` (observed: started 18:38:40, `claude_failed` 22s later). The gate blocks up to 120s for Anthropic reachability, then proceeds (a real outage is logged and retried next 5h window). Verified `curl` runs inside the unit's strict sandbox.
+
 ## [0.1.4] - 2026-06-25
 
 ### Changed

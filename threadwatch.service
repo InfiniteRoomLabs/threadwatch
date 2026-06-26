@@ -10,6 +10,11 @@ Description=threadwatch read-only knowledge-thread scan
 Type=oneshot
 ExecStart=%h/.local/bin/threadwatch run
 TimeoutStartSec=600
+# Boot-readiness gate: after a power-loss reboot the Persistent catch-up run fires
+# before the network/claude session is ready (observed: started 18:38:40, claude_failed
+# 22s later). Block up to 120s for Anthropic reachability, then proceed (logged + retried
+# next 5h window). curl works inside this sandbox -- claude makes the same AF_INET calls.
+ExecStartPre=/usr/bin/bash -c 'for i in $(seq 1 60); do curl -s -o /dev/null --max-time 3 https://api.anthropic.com/ && exit 0; sleep 2; done; echo "threadwatch: network not ready after 120s, proceeding"; exit 0'
 
 # PATH so the shebang finds `uv` and the script finds `claude` (both in ~/.local/bin).
 # UV_NO_CACHE keeps uv from writing a cache under the read-only home.
